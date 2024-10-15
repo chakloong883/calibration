@@ -1,0 +1,7 @@
+calibration:
+  mode: normal
+  image_height: 1080
+  image_width: 1920 
+  corner_height: 6
+  corner_width: 8
+  corner_radius: 10
