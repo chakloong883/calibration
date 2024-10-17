@@ -14,6 +14,20 @@ def check(param):
     else:
         return False
     
+def check_corner_direction(corners, corner_height, corner_width):
+    if corners[0][0][1] > corners[corner_height * corner_width-1][0][1] and corners[0][0][0] < corners[corner_height * corner_width-1][0][0]:
+        corners = corners
+    elif corners[0][0][1] > corners[corner_height * corner_width-1][0][1] and corners[0][0][0] > corners[corner_height * corner_width-1][0][0]:
+        corners = np.flipud(corners)
+        for i in range(corner_width):
+            corners[corner_height * i:corner_height * (i + 1)] = np.flipud(corners[corner_height * i:corner_height * (i + 1)])
+    elif corners[0][0][1] < corners[corner_height * corner_width-1][0][1] and corners[0][0][0] > corners[corner_height * corner_width-1][0][0]:
+        corners = np.flipud(corners)
+    else:
+        for i in range(corner_width):
+            corners[corner_height * i:corner_height * (i + 1)] = np.flipud(corners[corner_height * i:corner_height * (i + 1)])  
+    return corners
+
 
 
 class Calibration:
@@ -32,6 +46,7 @@ class Calibration:
         self.corner_radius = data["calibration"]["corner_radius"]
 
         self.matrix, self.new_camera_matrix, self.dist = None, None, None
+        self.second_matrix, self.second_dist = None, None
         self.rvecs, self.tvecs = None, None
 
 
@@ -56,6 +71,7 @@ class Calibration:
         else:
             self.calibrate_intrinsic()
             self.calibrate_extrinsic()
+            self.validate()
         self.save_param()
         
 
@@ -76,7 +92,9 @@ class Calibration:
                 objs_corner.append(obj_corner)
                 img_corners = cv2.cornerSubPix(gray, img_corners, winSize=(self.corner_radius//2, self.corner_radius//2),
                                               zeroZone=(-1, -1), criteria=criteria)
+                
                 imgs_corner.append(img_corners)
+
             else:
                 print("Fail to find corners in {}.".format(filename))
         # calibration
@@ -90,9 +108,23 @@ class Calibration:
         print('内参矩阵',self.matrix)
         print('最优内参矩阵',self.new_camera_matrix)
         print('畸变系数',self.dist)
-        # print("旋转向量",  rvecs)
-        # print("平移向量",  tvecs)
+        
+        mean_error = 0
+        for i in range(len(objs_corner)):
+            project_point, _ = cv2.projectPoints(objs_corner[i], rvecs[i], tvecs[i], self.matrix, self.dist)
+            error = cv2.norm(imgs_corner[i], project_point, cv2.NORM_L2)/len(project_point)
+            mean_error += error
 
+        print( "total error: {}".format(mean_error/len(objs_corner)) )
+
+        imgs_corner_array = np.array(imgs_corner)
+        imgs_corner_array_ = imgs_corner_array.reshape(imgs_corner_array.shape[0]*imgs_corner_array.shape[1]*imgs_corner_array.shape[2], 2)
+        undistort_point = cv2.undistortPoints(imgs_corner_array_, self.matrix, self.dist, None, self.new_camera_matrix)
+        undistort_point = undistort_point.reshape(imgs_corner_array.shape[0], imgs_corner_array.shape[1], imgs_corner_array.shape[2], 2)
+        ret, self.second_matrix, self.second_dist, rvecs, tvecs = cv2.calibrateCamera(objs_corner, undistort_point, self.image_size, None, None)
+        print("二次标定内参矩阵：", self.second_matrix)
+        print("二次标定畸变系数：", self.second_dist)
+        
         return ret
 
     def calibrate_extrinsic(self):
@@ -109,11 +141,14 @@ class Calibration:
             if ret:
                 img_corners = cv2.cornerSubPix(gray, img_corners, winSize=(self.corner_radius//2, self.corner_radius//2),
                                               zeroZone=(-1, -1), criteria=criteria)
+                
+                img_corners = check_corner_direction(img_corners, self.corner_height, self.corner_width)
+                
             else:
                 print("Fail to find corners in {}.".format(filename))
                 return False
             
-            ret, self.rvecs, self.tvecs, mis= cv2.solvePnPRansac(obj_corner, img_corners, self.matrix, self.dist)
+            ret, self.rvecs, self.tvecs, mis= cv2.solvePnPRansac(obj_corner, img_corners, self.second_matrix, self.second_dist)
             print('旋转向量', self.rvecs)
             print('平移向量', self.tvecs)
             
@@ -145,7 +180,8 @@ class Calibration:
                 cv2.imwrite("validate.png", gray)
 
     def pixel_to_world(self, point):
-        matrix_inv = np.matrix(self.matrix).I
+        matrix_inv = np.matrix(self.second_matrix).I
+
         rvecs, _ = cv2.Rodrigues(self.rvecs)
         rvecs_inv = np.matrix(rvecs).I
         rvecs_inv_tvecs = np.dot(rvecs_inv, self.tvecs)
@@ -172,12 +208,16 @@ class Calibration:
                 self.new_camera_matrix = np.array(self.param["new_matrix"])
             if "dist" in self.param:
                 self.dist = np.array(self.param["dist"])
+            if "second_matrix" in self.param:
+                self.second_matrix = np.array(self.param["second_matrix"])
+            if "second_dist" in self.param:
+                self.second_dist = np.array(self.param["second_dist"])
             if "rvecs" in self.param:
                 self.rvecs = np.array(self.param["rvecs"])
             if "tvecs" in self.param:
                 self.tvecs = np.array(self.param["tvecs"])
         
-        if (check(self.matrix) and check(self.new_camera_matrix) and check(self.dist)):
+        if (check(self.matrix) and check(self.new_camera_matrix) and check(self.dist) and check(self.second_matrix) and check(self.second_dist)):
             return True
         else:
             return False
@@ -187,7 +227,9 @@ class Calibration:
         self.param = {
             "matrix": self.matrix.tolist(),
             "new_matrix": self.new_camera_matrix.tolist(),
-            "dist": self.dist.tolist()
+            "dist": self.dist.tolist(),
+            "second_matrix": self.second_matrix.tolist(),
+            "second_dist": self.second_dist.tolist()
         }
         if self.rvecs is not None:
             self.param['rvecs'] = self.rvecs.tolist()
